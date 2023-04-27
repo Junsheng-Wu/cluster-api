@@ -32,7 +32,6 @@ import (
 	"sigs.k8s.io/cluster-api/api/v1beta1/index"
 	"sigs.k8s.io/cluster-api/controllers/noderefutil"
 	"sigs.k8s.io/cluster-api/internal/util/taints"
-	"sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/annotations"
 	"sigs.k8s.io/cluster-api/util/conditions"
 )
@@ -62,29 +61,37 @@ func (r *Reconciler) reconcileNode(ctx context.Context, cluster *clusterv1.Clust
 		return ctrl.Result{}, err
 	}
 
-	remoteClient, err := r.Tracker.GetClient(ctx, util.ObjectKey(cluster))
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
+	// easystack eks skip machine check to delete 65-87
+	//remoteClient, err := r.Tracker.GetClient(ctx, util.ObjectKey(cluster))
+	//if err != nil {
+	//	return ctrl.Result{}, err
+	//}
 	// Even if Status.NodeRef exists, continue to do the following checks to make sure Node is healthy
-	node, err := r.getNode(ctx, remoteClient, providerID)
-	if err != nil {
-		if err == ErrNodeNotFound {
-			// While a NodeRef is set in the status, failing to get that node means the node is deleted.
-			// If Status.NodeRef is not set before, node still can be in the provisioning state.
-			if machine.Status.NodeRef != nil {
-				conditions.MarkFalse(machine, clusterv1.MachineNodeHealthyCondition, clusterv1.NodeNotFoundReason, clusterv1.ConditionSeverityError, "")
-				return ctrl.Result{}, errors.Wrapf(err, "no matching Node for Machine %q in namespace %q", machine.Name, machine.Namespace)
-			}
-			conditions.MarkFalse(machine, clusterv1.MachineNodeHealthyCondition, clusterv1.NodeProvisioningReason, clusterv1.ConditionSeverityWarning, "")
-			// No need to requeue here. Nodes emit an event that triggers reconciliation.
-			return ctrl.Result{}, nil
-		}
-		log.Error(err, "Failed to retrieve Node by ProviderID")
-		r.recorder.Event(machine, corev1.EventTypeWarning, "Failed to retrieve Node by ProviderID", err.Error())
-		return ctrl.Result{}, err
-	}
+	//node, err := r.getNode(ctx, remoteClient, providerID)
+	//if err != nil {
+	//	if err == ErrNodeNotFound {
+	//		// While a NodeRef is set in the status, failing to get that node means the node is deleted.
+	//		// If Status.NodeRef is not set before, node still can be in the provisioning state.
+	//		if machine.Status.NodeRef != nil {
+	//			conditions.MarkFalse(machine, clusterv1.MachineNodeHealthyCondition, clusterv1.NodeNotFoundReason, clusterv1.ConditionSeverityError, "")
+	//			return ctrl.Result{}, errors.Wrapf(err, "no matching Node for Machine %q in namespace %q", machine.Name, machine.Namespace)
+	//		}
+	//		conditions.MarkFalse(machine, clusterv1.MachineNodeHealthyCondition, clusterv1.NodeProvisioningReason, clusterv1.ConditionSeverityWarning, "")
+	//		// No need to requeue here. Nodes emit an event that triggers reconciliation.
+	//		return ctrl.Result{}, nil
+	//	}
+	//	log.Error(err, "Failed to retrieve Node by ProviderID")
+	//	r.recorder.Event(machine, corev1.EventTypeWarning, "Failed to retrieve Node by ProviderID", err.Error())
+	//	return ctrl.Result{}, err
+	//}
+	// dont return real node information
+	// easystack eks skip machine check to add 90-95
+	node := &corev1.Node{}
+	node.Name = fmt.Sprintf("fake-%s",machine.Name)
+	node.UID = machine.UID
+	node.Status.NodeInfo.Architecture="any"
+	recondition := corev1.NodeCondition{Type: corev1.NodeReady,Status: corev1.ConditionTrue,LastTransitionTime: metav1.Now()}
+	node.Status.Conditions = append(node.Status.Conditions, recondition)
 
 	// Set the Machine NodeRef.
 	if machine.Status.NodeRef == nil {
@@ -116,23 +123,26 @@ func (r *Reconciler) reconcileNode(ctx context.Context, cluster *clusterv1.Clust
 	// Compute labels to be propagated from Machines to nodes.
 	// NOTE: CAPI should manage only a subset of node labels, everything else should be preserved.
 	// NOTE: Once we reconcile node labels for the first time, the NodeUninitializedTaint is removed from the node.
-	nodeLabels := getManagedLabels(machine.Labels)
+	// easystack eks skip machine check to delete 128
+	//nodeLabels := getManagedLabels(machine.Labels)
 
 	// Reconcile node taints
-	if err := r.patchNode(ctx, remoteClient, node, nodeLabels, nodeAnnotations); err != nil {
-		return ctrl.Result{}, errors.Wrapf(err, "failed to reconcile Node %s", klog.KObj(node))
-	}
+	// easystack eks skip check to delete 132-134
+	//if err := r.patchNode(ctx, remoteClient, node, nodeLabels, nodeAnnotations); err != nil {
+	//	return ctrl.Result{}, errors.Wrapf(err, "failed to reconcile Node %s", klog.KObj(node))
+	//}
 
 	// Do the remaining node health checks, then set the node health to true if all checks pass.
-	status, message := summarizeNodeConditions(node)
-	if status == corev1.ConditionFalse {
-		conditions.MarkFalse(machine, clusterv1.MachineNodeHealthyCondition, clusterv1.NodeConditionsFailedReason, clusterv1.ConditionSeverityWarning, message)
-		return ctrl.Result{}, nil
-	}
-	if status == corev1.ConditionUnknown {
-		conditions.MarkUnknown(machine, clusterv1.MachineNodeHealthyCondition, clusterv1.NodeConditionsFailedReason, message)
-		return ctrl.Result{}, nil
-	}
+	// easystack eks skip machine check to delete 138-146
+	//status, message := summarizeNodeConditions(node)
+	//if status == corev1.ConditionFalse {
+	//	conditions.MarkFalse(machine, clusterv1.MachineNodeHealthyCondition, clusterv1.NodeConditionsFailedReason, clusterv1.ConditionSeverityWarning, message)
+	//	return ctrl.Result{}, nil
+	//}
+	//if status == corev1.ConditionUnknown {
+	//	conditions.MarkUnknown(machine, clusterv1.MachineNodeHealthyCondition, clusterv1.NodeConditionsFailedReason, message)
+	//	return ctrl.Result{}, nil
+	//}
 
 	conditions.MarkTrue(machine, clusterv1.MachineNodeHealthyCondition)
 	return ctrl.Result{}, nil

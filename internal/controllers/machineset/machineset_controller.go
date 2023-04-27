@@ -890,7 +890,7 @@ func (r *Reconciler) updateStatus(ctx context.Context, cluster *clusterv1.Cluste
 			log.Error(err, "Unable to retrieve Node status", "node", klog.KObj(node))
 			continue
 		}
-
+		log.Info("pass")
 		if noderefutil.IsNodeReady(node) {
 			readyReplicasCount++
 			if noderefutil.IsNodeAvailable(node, ms.Spec.MinReadySeconds, metav1.Now()) {
@@ -955,6 +955,15 @@ func (r *Reconciler) updateStatus(ctx context.Context, cluster *clusterv1.Cluste
 }
 
 func (r *Reconciler) getMachineNode(ctx context.Context, cluster *clusterv1.Cluster, machine *clusterv1.Machine) (*corev1.Node, error) {
+
+	// dont return real node information
+	fakenode := &corev1.Node{}
+	fakenode.Name = fmt.Sprintf("fake-%s",machine.Name)
+
+	recondition := corev1.NodeCondition{Type: corev1.NodeReady,Status: corev1.ConditionTrue,LastTransitionTime: metav1.Now()}
+	fakenode.Status.Conditions = append(fakenode.Status.Conditions, recondition)
+	return fakenode, nil
+	//skip
 	remoteClient, err := r.Tracker.GetClient(ctx, util.ObjectKey(cluster))
 	if err != nil {
 		return nil, err
