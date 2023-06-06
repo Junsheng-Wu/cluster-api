@@ -192,9 +192,9 @@ func (r *Reconciler) reconcile(ctx context.Context, cluster *clusterv1.Cluster) 
 
 	phases := []func(context.Context, *clusterv1.Cluster) (ctrl.Result, error){
 		r.reconcileInfrastructure,
-		r.reconcileControlPlane,
-		r.reconcileKubeconfig,
-		r.reconcileControlPlaneInitialized,
+		//r.reconcileControlPlane,
+		//r.reconcileKubeconfig,
+		//r.reconcileControlPlaneInitialized,
 	}
 
 	res := ctrl.Result{}
