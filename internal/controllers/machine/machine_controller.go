@@ -281,7 +281,7 @@ func (r *Reconciler) reconcile(ctx context.Context, cluster *clusterv1.Cluster, 
 	}
 
 	phases := []func(context.Context, *scope) (ctrl.Result, error){
-		r.reconcileBootstrap,
+		//r.reconcileBootstrap,
 		r.reconcileInfrastructure,
 		r.reconcileNode,
 		r.reconcileCertificateExpiry,
