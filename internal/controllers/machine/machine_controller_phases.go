@@ -28,7 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/klog/v2"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -95,12 +95,17 @@ func (r *Reconciler) reconcileExternal(ctx context.Context, cluster *clusterv1.C
 		return external.ReconcileOutput{}, err
 	}
 
-	obj, err := external.Get(ctx, r.Client, ref, m.Namespace)
+	obj, err := external.Get(ctx, r.UnstructuredCachingClient, ref, m.Namespace)
 	if err != nil {
 		if apierrors.IsNotFound(errors.Cause(err)) {
-			log.Info("could not find external ref, requeuing", ref.Kind, klog.KRef(m.Namespace, ref.Name))
+			log.Info("could not find external ref, requeuing", ref.Kind, klog.KRef(ref.Namespace, ref.Name))
 			return external.ReconcileOutput{RequeueAfter: externalReadyWait}, nil
 		}
+		return external.ReconcileOutput{}, err
+	}
+
+	// Ensure we add a watch to the external object, if there isn't one already.
+	if err := r.externalTracker.Watch(log, obj, handler.EnqueueRequestForOwner(r.Client.Scheme(), r.Client.RESTMapper(), &clusterv1.Machine{})); err != nil {
 		return external.ReconcileOutput{}, err
 	}
 
@@ -141,11 +146,6 @@ func (r *Reconciler) reconcileExternal(ctx context.Context, cluster *clusterv1.C
 		return external.ReconcileOutput{}, err
 	}
 
-	// Ensure we add a watcher to the external object.
-	if err := r.externalTracker.Watch(log, obj, &handler.EnqueueRequestForOwner{OwnerType: &clusterv1.Machine{}}); err != nil {
-		return external.ReconcileOutput{}, err
-	}
-
 	// Set failure reason and message, if any.
 	failureReason, failureMessage, err := external.FailuresFrom(obj)
 	if err != nil {
@@ -156,7 +156,7 @@ func (r *Reconciler) reconcileExternal(ctx context.Context, cluster *clusterv1.C
 		m.Status.FailureReason = &machineStatusError
 	}
 	if failureMessage != "" {
-		m.Status.FailureMessage = pointer.String(
+		m.Status.FailureMessage = ptr.To(
 			fmt.Sprintf("Failure detected from referenced resource %v with name %q: %s",
 				obj.GroupVersionKind(), obj.GetName(), failureMessage),
 		)
@@ -166,8 +166,10 @@ func (r *Reconciler) reconcileExternal(ctx context.Context, cluster *clusterv1.C
 }
 
 // reconcileBootstrap reconciles the Spec.Bootstrap.ConfigRef object on a Machine.
-func (r *Reconciler) reconcileBootstrap(ctx context.Context, cluster *clusterv1.Cluster, m *clusterv1.Machine) (ctrl.Result, error) {
+func (r *Reconciler) reconcileBootstrap(ctx context.Context, s *scope) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
+	cluster := s.cluster
+	m := s.machine
 
 	// If the Bootstrap ref is nil (and so the machine should use user generated data secret), return.
 	if m.Spec.Bootstrap.ConfigRef == nil {
@@ -179,6 +181,7 @@ func (r *Reconciler) reconcileBootstrap(ctx context.Context, cluster *clusterv1.
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	s.bootstrapConfig = externalResult.Result
 
 	// If the external object is paused return.
 	if externalResult.Paused {
@@ -217,7 +220,7 @@ func (r *Reconciler) reconcileBootstrap(ctx context.Context, cluster *clusterv1.
 	// If the bootstrap provider is not ready, requeue.
 	if !ready {
 		log.Info("Waiting for bootstrap provider to generate data secret and report status.ready", bootstrapConfig.GetKind(), klog.KObj(bootstrapConfig))
-		return ctrl.Result{RequeueAfter: externalReadyWait}, nil
+		return ctrl.Result{}, nil
 	}
 
 	// Get and set the name of the secret containing the bootstrap data.
@@ -227,7 +230,7 @@ func (r *Reconciler) reconcileBootstrap(ctx context.Context, cluster *clusterv1.
 	} else if secretName == "" {
 		return ctrl.Result{}, errors.Errorf("retrieved empty dataSecretName from bootstrap provider for Machine %q in namespace %q", m.Name, m.Namespace)
 	}
-	m.Spec.Bootstrap.DataSecretName = pointer.String(secretName)
+	m.Spec.Bootstrap.DataSecretName = ptr.To(secretName)
 	if !m.Status.BootstrapReady {
 		log.Info("Bootstrap provider generated data secret and reports status.ready", bootstrapConfig.GetKind(), klog.KObj(bootstrapConfig), "Secret", klog.KRef(m.Namespace, secretName))
 	}
@@ -236,20 +239,23 @@ func (r *Reconciler) reconcileBootstrap(ctx context.Context, cluster *clusterv1.
 }
 
 // reconcileInfrastructure reconciles the Spec.InfrastructureRef object on a Machine.
-func (r *Reconciler) reconcileInfrastructure(ctx context.Context, cluster *clusterv1.Cluster, m *clusterv1.Machine) (ctrl.Result, error) {
+func (r *Reconciler) reconcileInfrastructure(ctx context.Context, s *scope) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
+	cluster := s.cluster
+	m := s.machine
 
 	// Call generic external reconciler.
 	infraReconcileResult, err := r.reconcileExternal(ctx, cluster, m, &m.Spec.InfrastructureRef)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	s.infraMachine = infraReconcileResult.Result
 	if infraReconcileResult.RequeueAfter > 0 {
 		// Infra object went missing after the machine was up and running
 		if m.Status.InfrastructureReady {
 			log.Error(err, "Machine infrastructure reference has been deleted after being ready, setting failure state")
 			m.Status.FailureReason = capierrors.MachineStatusErrorPtr(capierrors.InvalidConfigurationMachineError)
-			m.Status.FailureMessage = pointer.String(fmt.Sprintf("Machine infrastructure resource %v with name %q has been deleted after being ready",
+			m.Status.FailureMessage = ptr.To(fmt.Sprintf("Machine infrastructure resource %v with name %q has been deleted after being ready",
 				m.Spec.InfrastructureRef.GroupVersionKind(), m.Spec.InfrastructureRef.Name))
 			return ctrl.Result{}, errors.Errorf("could not find %v %q for Machine %q in namespace %q, requeuing", m.Spec.InfrastructureRef.GroupVersionKind().String(), m.Spec.InfrastructureRef.Name, m.Name, m.Namespace)
 		}
@@ -284,7 +290,7 @@ func (r *Reconciler) reconcileInfrastructure(ctx context.Context, cluster *clust
 	// If the infrastructure provider is not ready, return early.
 	if !ready {
 		log.Info("Waiting for infrastructure provider to create machine infrastructure and report status.ready", infraConfig.GetKind(), klog.KObj(infraConfig))
-		return ctrl.Result{RequeueAfter: externalReadyWait}, nil
+		return ctrl.Result{}, nil
 	}
 
 	// Get Spec.ProviderID from the infrastructure provider.
@@ -309,14 +315,15 @@ func (r *Reconciler) reconcileInfrastructure(ctx context.Context, cluster *clust
 	case err != nil:
 		return ctrl.Result{}, errors.Wrapf(err, "failed to retrieve failure domain from infrastructure provider for Machine %q in namespace %q", m.Name, m.Namespace)
 	default:
-		m.Spec.FailureDomain = pointer.String(failureDomain)
+		m.Spec.FailureDomain = ptr.To(failureDomain)
 	}
 
-	m.Spec.ProviderID = pointer.String(providerID)
+	m.Spec.ProviderID = ptr.To(providerID)
 	return ctrl.Result{}, nil
 }
 
-func (r *Reconciler) reconcileCertificateExpiry(ctx context.Context, _ *clusterv1.Cluster, m *clusterv1.Machine) (ctrl.Result, error) {
+func (r *Reconciler) reconcileCertificateExpiry(_ context.Context, s *scope) (ctrl.Result, error) {
+	m := s.machine
 	var annotations map[string]string
 
 	if !util.IsControlPlaneMachine(m) {
@@ -337,21 +344,15 @@ func (r *Reconciler) reconcileCertificateExpiry(ctx context.Context, _ *clusterv
 		}
 		expTime := metav1.NewTime(expiryTime)
 		m.Status.CertificatesExpiryDate = &expTime
-	} else if m.Spec.Bootstrap.ConfigRef != nil {
+	} else if s.bootstrapConfig != nil {
 		// If the expiry information is not available on the machine annotation
 		// look for it on the bootstrap config.
-		bootstrapConfig, err := external.Get(ctx, r.Client, m.Spec.Bootstrap.ConfigRef, m.Namespace)
-		if err != nil {
-			return ctrl.Result{}, errors.Wrap(err, "failed to reconcile certificates expiry")
-		}
-
-		// Check for certificate expiry information in the bootstrap config.
-		annotations = bootstrapConfig.GetAnnotations()
+		annotations = s.bootstrapConfig.GetAnnotations()
 		if expiry, ok := annotations[clusterv1.MachineCertificatesExpiryDateAnnotation]; ok {
 			expiryInfoFound = true
 			expiryTime, err := time.Parse(time.RFC3339, expiry)
 			if err != nil {
-				return ctrl.Result{}, errors.Wrapf(err, "failed to reconcile certificates expiry: failed to parse expiry date from annotation on %s", klog.KObj(bootstrapConfig))
+				return ctrl.Result{}, errors.Wrapf(err, "failed to reconcile certificates expiry: failed to parse expiry date from annotation on %s", klog.KObj(s.bootstrapConfig))
 			}
 			expTime := metav1.NewTime(expiryTime)
 			m.Status.CertificatesExpiryDate = &expTime

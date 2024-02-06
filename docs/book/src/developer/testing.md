@@ -256,7 +256,7 @@ Now you can start the e2e test via IDE as described above but with the additiona
 **Note**: This can also be used to debug controllers during e2e tests as described in [Developing Cluster API with Tilt](./tilt.md#wiring-up-debuggers).
 
 The e2e tests also create a local clusterctl repository. After it has been created on a first test execution this step can also be 
-skipped by setting `-e2e.cluster-config=<ARTIFACTS>/repository/clusterctl-config.yaml`. This also works with a clusterctl repository created 
+skipped by setting `-e2e.clusterctl-config=<ARTIFACTS>/repository/clusterctl-config.yaml`. This also works with a clusterctl repository created 
 via [Create the local repository](http://localhost:3000/clusterctl/developers.html#create-the-local-repository).
 
 **Feature gates**: E2E tests often use features which need to be enabled first. Make sure to enable the feature gates in the tilt settings file:
@@ -267,7 +267,7 @@ kustomize_substitutions:
   EXP_CLUSTER_RESOURCE_SET: "true"
   EXP_KUBEADM_BOOTSTRAP_FORMAT_IGNITION: "true"
   EXP_RUNTIME_SDK: "true"
-  EXP_LAZY_RESTMAPPER: "true"
+  EXP_MACHINE_SET_PREFLIGHT_CHECKS: "true"
 ```
 
 </aside>
@@ -316,7 +316,7 @@ analyzing them via Grafana.
    Just click on the downwards arrow, enter either a ProwJob URL, a GCS path or a local folder and click on `Import Logs`.
    This will retrieve the logs and push them to Loki. Alternatively, the logs can be imported via:
    ```bash
-   go run ./hack/tools/log-push --log-path=<log-path>
+   go run ./hack/tools/internal/log-push --log-path=<log-path>
    ```
    Examples for log paths:
     * ProwJob URL: `https://prow.k8s.io/view/gs/kubernetes-jenkins/pr-logs/pull/kubernetes-sigs_cluster-api/6189/pull-cluster-api-e2e-main/1496954690603061248`
@@ -338,6 +338,24 @@ analyzing them via Grafana.
   take a few minutes until the logs show up in Loki. The original timestamp is preserved as `original_ts`.
 
 </aside>
+
+As alternative to loki, JSON logs can be visualized with a human readable timestamp using `jq`:
+
+1. Browse the ProwJob artifacts and download the wanted logfile.
+2. Use `jq` to query the logs:
+
+   ```bash
+   cat manager.log \
+     | grep -v "TLS handshake error" \
+     | jq -r '(.ts / 1000 | todateiso8601) + " " + (. | tostring)'
+   ```
+
+   The `(. | tostring)` part could also be customized to only output parts of the JSON logline.
+   E.g.:
+  
+   * `(.err)` to only output the error message part.
+   * `(.msg)` to only output the message part.
+   * `(.controller + " " + .msg)` to output the controller name and message part.
 
 ### Known Issues
 

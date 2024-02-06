@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -32,13 +33,16 @@ import (
 	dockercontainer "github.com/docker/docker/api/types/container"
 	dockerfilters "github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/network"
+	dockersystem "github.com/docker/docker/api/types/system"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
 	"github.com/pkg/errors"
-	"k8s.io/utils/pointer"
+	kerrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/utils/ptr"
 
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	"sigs.k8s.io/cluster-api/test/infrastructure/kind"
 )
 
 const (
@@ -262,7 +266,7 @@ func (d *dockerRuntime) ExecContainer(ctx context.Context, containerName string,
 
 // ListContainers returns a list of all containers.
 func (d *dockerRuntime) ListContainers(ctx context.Context, filters FilterBuilder) ([]Container, error) {
-	listOptions := types.ContainerListOptions{
+	listOptions := dockercontainer.ListOptions{
 		All:     true,
 		Limit:   -1,
 		Filters: dockerfilters.NewArgs(),
@@ -297,8 +301,8 @@ func (d *dockerRuntime) ListContainers(ctx context.Context, filters FilterBuilde
 
 // DeleteContainer will remove a container, forcing removal if still running.
 func (d *dockerRuntime) DeleteContainer(ctx context.Context, containerName string) error {
-	return d.dockerClient.ContainerRemove(ctx, containerName, types.ContainerRemoveOptions{
-		Force:         true, // force the container to be delete now
+	return d.dockerClient.ContainerRemove(ctx, containerName, dockercontainer.RemoveOptions{
+		Force:         true, // force the container to be deleted now
 		RemoveVolumes: true, // delete volumes
 	})
 }
@@ -331,10 +335,15 @@ func (d *dockerRuntime) ContainerDebugInfo(ctx context.Context, containerName st
 		return errors.Wrapf(err, "failed to inspect container %q", containerName)
 	}
 
-	fmt.Fprintln(w, "Inspected the container:")
-	fmt.Fprintf(w, "%+v\n", containerInfo)
+	rawJSON, err := json.Marshal(containerInfo)
+	if err != nil {
+		return errors.Wrapf(err, "failed to marshal container info to json")
+	}
 
-	options := types.ContainerLogsOptions{
+	fmt.Fprintln(w, "Inspected the container:")
+	fmt.Fprintf(w, "%s\n", rawJSON)
+
+	options := dockercontainer.LogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
 	}
@@ -384,6 +393,8 @@ func (d *dockerRuntime) RunContainer(ctx context.Context, runConfig *RunContaine
 		restartMaximumRetryCount = 1
 	}
 
+	// TODO: check if we can simplify the following code for the CAPD load balancer, which now always has runConfig.KindMode == kind.ModeNone
+
 	hostConfig := dockercontainer.HostConfig{
 		// Running containers in a container requires privileges.
 		// NOTE: we could try to replicate this with --cap-add, and use less
@@ -396,11 +407,16 @@ func (d *dockerRuntime) RunContainer(ctx context.Context, runConfig *RunContaine
 		Tmpfs:         runConfig.Tmpfs,
 		PortBindings:  nat.PortMap{},
 		RestartPolicy: dockercontainer.RestartPolicy{Name: restartPolicy, MaximumRetryCount: restartMaximumRetryCount},
-		Init:          pointer.Bool(false),
+		Init:          ptr.To(false),
 	}
 	networkConfig := network.NetworkingConfig{}
 
-	if runConfig.IPFamily == clusterv1.IPv6IPFamily {
+	// NOTE: starting from Kind 0.20 kind requires CgroupnsMode to be set to private.
+	if runConfig.KindMode != kind.ModeNone && runConfig.KindMode != kind.Mode0_19 {
+		hostConfig.CgroupnsMode = "private"
+	}
+
+	if runConfig.IPFamily == clusterv1.IPv6IPFamily || runConfig.IPFamily == clusterv1.DualStackIPFamily {
 		hostConfig.Sysctls = map[string]string{
 			"net.ipv6.conf.all.disable_ipv6": "0",
 			"net.ipv6.conf.all.forwarding":   "1",
@@ -475,7 +491,7 @@ func (d *dockerRuntime) RunContainer(ctx context.Context, runConfig *RunContaine
 	var containerOutput types.HijackedResponse
 	if output != nil {
 		// Read out any output from the container
-		attachOpts := types.ContainerAttachOptions{
+		attachOpts := dockercontainer.AttachOptions{
 			Stream: true,
 			Stdin:  false,
 			Stdout: true,
@@ -490,8 +506,14 @@ func (d *dockerRuntime) RunContainer(ctx context.Context, runConfig *RunContaine
 	}
 
 	// Actually start the container
-	if err := d.dockerClient.ContainerStart(ctx, resp.ID, types.ContainerStartOptions{}); err != nil {
-		return errors.Wrapf(err, "error starting container %q", runConfig.Name)
+	if err := d.dockerClient.ContainerStart(ctx, resp.ID, dockercontainer.StartOptions{}); err != nil {
+		err := errors.Wrapf(err, "error starting container %q", runConfig.Name)
+		// Delete the container and retry later on. This helps getting around the race
+		// condition where of hitting "port is already allocated" issues.
+		if reterr := d.dockerClient.ContainerRemove(ctx, resp.ID, dockercontainer.RemoveOptions{Force: true, RemoveVolumes: true}); reterr != nil {
+			return kerrors.NewAggregate([]error{err, errors.Wrapf(reterr, "error deleting container")})
+		}
+		return err
 	}
 
 	if output != nil {
@@ -535,7 +557,7 @@ func (d *dockerRuntime) RunContainer(ctx context.Context, runConfig *RunContaine
 // needsDevMapper checks whether we need to mount /dev/mapper.
 // This is required when the docker storage driver is Btrfs or ZFS.
 // https://github.com/kubernetes-sigs/kind/pull/1464
-func (d *dockerRuntime) needsDevMapper(info types.Info) bool {
+func (d *dockerRuntime) needsDevMapper(info dockersystem.Info) bool {
 	return info.Driver == btrfsStorage || info.Driver == zfsStorage
 }
 
@@ -662,7 +684,7 @@ func (d *dockerRuntime) getProxyDetails(ctx context.Context, network string, nod
 }
 
 // usernsRemap checks if userns-remap is enabled in dockerd.
-func (d *dockerRuntime) usernsRemap(info types.Info) bool {
+func (d *dockerRuntime) usernsRemap(info dockersystem.Info) bool {
 	for _, secOpt := range info.SecurityOptions {
 		if strings.Contains(secOpt, "name=userns") {
 			return true
@@ -673,7 +695,7 @@ func (d *dockerRuntime) usernsRemap(info types.Info) bool {
 
 // mountDevMapper checks if the Docker storage driver is Btrfs or ZFS
 // or if the backing filesystem is Btrfs.
-func (d *dockerRuntime) mountDevMapper(info types.Info) bool {
+func (d *dockerRuntime) mountDevMapper(info dockersystem.Info) bool {
 	storage := ""
 	storage = strings.ToLower(strings.TrimSpace(info.Driver))
 	if storage == btrfsStorage || storage == zfsStorage || storage == "devicemapper" {
@@ -695,7 +717,7 @@ func (d *dockerRuntime) mountDevMapper(info types.Info) bool {
 
 // rootless: use fuse-overlayfs by default
 // https://github.com/kubernetes-sigs/kind/issues/2275
-func (d *dockerRuntime) mountFuse(info types.Info) bool {
+func (d *dockerRuntime) mountFuse(info dockersystem.Info) bool {
 	for _, o := range info.SecurityOptions {
 		// o is like "name=seccomp,profile=default", or "name=rootless",
 		csvReader := csv.NewReader(strings.NewReader(o))

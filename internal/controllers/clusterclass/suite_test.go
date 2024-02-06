@@ -62,16 +62,12 @@ func TestMain(m *testing.M) {
 		}
 	}
 	setupReconcilers := func(ctx context.Context, mgr ctrl.Manager) {
-		unstructuredCachingClient, err := client.NewDelegatingClient(
-			client.NewDelegatingClientInput{
-				// Use the default client for write operations.
-				Client: mgr.GetClient(),
-				// For read operations, use the same cache used by all the controllers but ensure
-				// unstructured objects will be also cached (this does not happen with the default client).
-				CacheReader:       mgr.GetCache(),
-				CacheUnstructured: true,
+		unstructuredCachingClient, err := client.New(mgr.GetConfig(), client.Options{
+			Cache: &client.CacheOptions{
+				Reader:       mgr.GetCache(),
+				Unstructured: true,
 			},
-		)
+		})
 		if err != nil {
 			panic(fmt.Sprintf("unable to create unstructuredCachineClient: %v", err))
 		}
@@ -94,12 +90,15 @@ func TestMain(m *testing.M) {
 	}))
 }
 
-func ownerReferenceTo(obj client.Object) *metav1.OwnerReference {
+// ownerReferenceTo converts an object to an OwnerReference.
+// Note: We pass in gvk explicitly as we can't rely on GVK being set on all objects
+// (only on Unstructured).
+func ownerReferenceTo(obj client.Object, gvk schema.GroupVersionKind) *metav1.OwnerReference {
 	return &metav1.OwnerReference{
-		Kind:       obj.GetObjectKind().GroupVersionKind().Kind,
+		APIVersion: gvk.GroupVersion().String(),
+		Kind:       gvk.Kind,
 		Name:       obj.GetName(),
 		UID:        obj.GetUID(),
-		APIVersion: obj.GetObjectKind().GroupVersionKind().GroupVersion().String(),
 	}
 }
 

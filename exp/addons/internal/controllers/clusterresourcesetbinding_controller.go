@@ -27,7 +27,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	addonsv1 "sigs.k8s.io/cluster-api/exp/addons/api/v1beta1"
@@ -52,7 +51,7 @@ func (r *ClusterResourceSetBindingReconciler) SetupWithManager(ctx context.Conte
 	err := ctrl.NewControllerManagedBy(mgr).
 		For(&addonsv1.ClusterResourceSetBinding{}).
 		Watches(
-			&source.Kind{Type: &clusterv1.Cluster{}},
+			&clusterv1.Cluster{},
 			handler.EnqueueRequestsFromMapFunc(r.clusterToClusterResourceSetBinding),
 		).
 		WithOptions(options).
@@ -107,7 +106,7 @@ func (r *ClusterResourceSetBindingReconciler) Reconcile(ctx context.Context, req
 }
 
 // clusterToClusterResourceSetBinding is mapper function that maps clusters to ClusterResourceSetBinding.
-func (r *ClusterResourceSetBindingReconciler) clusterToClusterResourceSetBinding(o client.Object) []ctrl.Request {
+func (r *ClusterResourceSetBindingReconciler) clusterToClusterResourceSetBinding(_ context.Context, o client.Object) []ctrl.Request {
 	return []reconcile.Request{
 		{
 			NamespacedName: client.ObjectKey{
@@ -124,7 +123,7 @@ func (r *ClusterResourceSetBindingReconciler) clusterToClusterResourceSetBinding
 func (r *ClusterResourceSetBindingReconciler) updateClusterReference(ctx context.Context, binding *addonsv1.ClusterResourceSetBinding) error {
 	patchHelper, err := patch.NewHelper(binding, r.Client)
 	if err != nil {
-		return errors.Wrap(err, "failed to configure the patch helper")
+		return err
 	}
 
 	// If the `.spec.clusterName` is not set, take the value from the ownerReference.

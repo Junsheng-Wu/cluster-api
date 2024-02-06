@@ -22,20 +22,19 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/blang/semver"
+	"github.com/blang/semver/v4"
 	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	controlplanev1 "sigs.k8s.io/cluster-api/controlplane/kubeadm/api/v1beta1"
 	"sigs.k8s.io/cluster-api/controlplane/kubeadm/internal"
-	"sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/annotations"
+	"sigs.k8s.io/cluster-api/util/collections"
 	"sigs.k8s.io/cluster-api/util/conditions"
 	"sigs.k8s.io/cluster-api/util/patch"
 )
@@ -56,7 +55,7 @@ func (r *KubeadmControlPlaneReconciler) reconcileUnhealthyMachines(ctx context.C
 			m.DeletionTimestamp.IsZero() {
 			patchHelper, err := patch.NewHelper(m, r.Client)
 			if err != nil {
-				errList = append(errList, errors.Wrapf(err, "failed to get PatchHelper for machine %s", m.Name))
+				errList = append(errList, err)
 				continue
 			}
 
@@ -65,7 +64,7 @@ func (r *KubeadmControlPlaneReconciler) reconcileUnhealthyMachines(ctx context.C
 			if err := patchHelper.Patch(ctx, m, patch.WithOwnedConditions{Conditions: []clusterv1.ConditionType{
 				clusterv1.MachineOwnerRemediatedCondition,
 			}}); err != nil {
-				errList = append(errList, errors.Wrapf(err, "failed to patch machine %s", m.Name))
+				errList = append(errList, err)
 			}
 		}
 	}
@@ -82,12 +81,13 @@ func (r *KubeadmControlPlaneReconciler) reconcileUnhealthyMachines(ctx context.C
 		return ctrl.Result{}, nil
 	}
 
-	// Select the machine to be remediated, which is the oldest machine marked as unhealthy.
+	// Select the machine to be remediated, which is the oldest machine marked as unhealthy not yet provisioned (if any)
+	// or the oldest machine marked as unhealthy.
 	//
 	// NOTE: The current solution is considered acceptable for the most frequent use case (only one unhealthy machine),
 	// however, in the future this could potentially be improved for the scenario where more than one unhealthy machine exists
 	// by considering which machine has lower impact on etcd quorum.
-	machineToBeRemediated := unhealthyMachines.Oldest()
+	machineToBeRemediated := getMachineToBeRemediated(unhealthyMachines)
 
 	// Returns if the machine is in the process of being deleted.
 	if !machineToBeRemediated.ObjectMeta.DeletionTimestamp.IsZero() {
@@ -148,6 +148,13 @@ func (r *KubeadmControlPlaneReconciler) reconcileUnhealthyMachines(ctx context.C
 			return ctrl.Result{}, nil
 		}
 
+		// The cluster MUST NOT have healthy machines still being provisioned. This rule prevents KCP taking actions while the cluster is in a transitional state.
+		if controlPlane.HasHealthyMachineStillProvisioning() {
+			log.Info("A control plane machine needs remediation, but there are other control-plane machines being provisioned. Skipping remediation")
+			conditions.MarkFalse(machineToBeRemediated, clusterv1.MachineOwnerRemediatedCondition, clusterv1.WaitingForRemediationReason, clusterv1.ConditionSeverityWarning, "KCP waiting for control plane machine provisioning to complete before triggering remediation")
+			return ctrl.Result{}, nil
+		}
+
 		// The cluster MUST have no machines with a deletion timestamp. This rule prevents KCP taking actions while the cluster is in a transitional state.
 		if controlPlane.HasDeletingMachine() {
 			log.Info("A control plane machine needs remediation, but there are other control-plane machines being deleted. Skipping remediation")
@@ -177,7 +184,7 @@ func (r *KubeadmControlPlaneReconciler) reconcileUnhealthyMachines(ctx context.C
 		// - if the machine hosts the etcd leader, forward etcd leadership to another machine.
 		// - delete the etcd member hosted on the machine being deleted.
 		// - remove the etcd member from the kubeadm config map (only for kubernetes version older than v1.22.0)
-		workloadCluster, err := r.managementCluster.GetWorkloadCluster(ctx, util.ObjectKey(controlPlane.Cluster))
+		workloadCluster, err := controlPlane.GetWorkloadCluster(ctx)
 		if err != nil {
 			log.Error(err, "Failed to create client to workload cluster")
 			return ctrl.Result{}, errors.Wrapf(err, "failed to create client to workload cluster")
@@ -238,6 +245,16 @@ func (r *KubeadmControlPlaneReconciler) reconcileUnhealthyMachines(ctx context.C
 	})
 
 	return ctrl.Result{Requeue: true}, nil
+}
+
+// Gets the machine to be remediated, which is the oldest machine marked as unhealthy not yet provisioned (if any)
+// or the oldest machine marked as unhealthy.
+func getMachineToBeRemediated(unhealthyMachines collections.Machines) *clusterv1.Machine {
+	machineToBeRemediated := unhealthyMachines.Filter(collections.Not(collections.HasNode())).Oldest()
+	if machineToBeRemediated == nil {
+		machineToBeRemediated = unhealthyMachines.Oldest()
+	}
+	return machineToBeRemediated
 }
 
 // checkRetryLimits checks if KCP is allowed to remediate considering retry limits:
@@ -329,14 +346,6 @@ func (r *KubeadmControlPlaneReconciler) checkRetryLimits(log logr.Logger, machin
 	return remediationInProgressData, true, nil
 }
 
-// max calculates the maximum duration.
-func max(x, y time.Duration) time.Duration {
-	if x < y {
-		return y
-	}
-	return x
-}
-
 // canSafelyRemoveEtcdMember assess if it is possible to remove the member hosted on the machine to be remediated
 // without loosing etcd quorum.
 //
@@ -355,10 +364,7 @@ func max(x, y time.Duration) time.Duration {
 func (r *KubeadmControlPlaneReconciler) canSafelyRemoveEtcdMember(ctx context.Context, controlPlane *internal.ControlPlane, machineToBeRemediated *clusterv1.Machine) (bool, error) {
 	log := ctrl.LoggerFrom(ctx)
 
-	workloadCluster, err := r.managementCluster.GetWorkloadCluster(ctx, client.ObjectKey{
-		Namespace: controlPlane.Cluster.Namespace,
-		Name:      controlPlane.Cluster.Name,
-	})
+	workloadCluster, err := controlPlane.GetWorkloadCluster(ctx)
 	if err != nil {
 		return false, errors.Wrapf(err, "failed to get client for workload cluster %s", controlPlane.Cluster.Name)
 	}

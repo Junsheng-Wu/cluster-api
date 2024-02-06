@@ -29,7 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
@@ -106,17 +106,17 @@ func WaitForMachineDeploymentNodesToExist(ctx context.Context, input WaitForMach
 	By("Waiting for the workload nodes to exist")
 	Eventually(func(g Gomega) {
 		selectorMap, err := metav1.LabelSelectorAsMap(&input.MachineDeployment.Spec.Selector)
-		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(err).ToNot(HaveOccurred())
 		ms := &clusterv1.MachineSetList{}
 		err = input.Lister.List(ctx, ms, client.InNamespace(input.Cluster.Namespace), client.MatchingLabels(selectorMap))
-		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(err).ToNot(HaveOccurred())
 		g.Expect(ms.Items).NotTo(BeEmpty())
 		machineSet := ms.Items[0]
 		selectorMap, err = metav1.LabelSelectorAsMap(&machineSet.Spec.Selector)
-		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(err).ToNot(HaveOccurred())
 		machines := &clusterv1.MachineList{}
 		err = input.Lister.List(ctx, machines, client.InNamespace(machineSet.Namespace), client.MatchingLabels(selectorMap))
-		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(err).ToNot(HaveOccurred())
 		count := 0
 		for _, machine := range machines.Items {
 			if machine.Status.NodeRef != nil {
@@ -141,23 +141,24 @@ func AssertMachineDeploymentFailureDomains(ctx context.Context, input AssertMach
 	Expect(input.Lister).ToNot(BeNil(), "Invalid argument. input.Lister can't be nil when calling AssertMachineDeploymentFailureDomains")
 	Expect(input.MachineDeployment).ToNot(BeNil(), "Invalid argument. input.MachineDeployment can't be nil when calling AssertMachineDeploymentFailureDomains")
 
-	machineDeploymentFD := pointer.StringDeref(input.MachineDeployment.Spec.Template.Spec.FailureDomain, "<None>")
+	machineDeploymentFD := ptr.Deref(input.MachineDeployment.Spec.Template.Spec.FailureDomain, "<None>")
 
 	Byf("Checking all the machines controlled by %s are in the %q failure domain", input.MachineDeployment.Name, machineDeploymentFD)
 	selectorMap, err := metav1.LabelSelectorAsMap(&input.MachineDeployment.Spec.Selector)
-	Expect(err).NotTo(HaveOccurred())
+	Expect(err).ToNot(HaveOccurred())
 
 	ms := &clusterv1.MachineSetList{}
 	Eventually(func() error {
 		return input.Lister.List(ctx, ms, client.InNamespace(input.Cluster.Namespace), client.MatchingLabels(selectorMap))
 	}, retryableOperationTimeout, retryableOperationInterval).Should(Succeed(), "Failed to list MachineSets for Cluster %s", klog.KObj(input.Cluster))
 
-	for _, machineSet := range ms.Items {
-		machineSetFD := pointer.StringDeref(machineSet.Spec.Template.Spec.FailureDomain, "<None>")
+	for i := range ms.Items {
+		machineSet := ms.Items[i]
+		machineSetFD := ptr.Deref(machineSet.Spec.Template.Spec.FailureDomain, "<None>")
 		Expect(machineSetFD).To(Equal(machineDeploymentFD), "MachineSet %s is in the %q failure domain, expecting %q", machineSet.Name, machineSetFD, machineDeploymentFD)
 
 		selectorMap, err = metav1.LabelSelectorAsMap(&machineSet.Spec.Selector)
-		Expect(err).NotTo(HaveOccurred())
+		Expect(err).ToNot(HaveOccurred())
 
 		machines := &clusterv1.MachineList{}
 		Eventually(func() error {
@@ -165,7 +166,7 @@ func AssertMachineDeploymentFailureDomains(ctx context.Context, input AssertMach
 		}, retryableOperationTimeout, retryableOperationInterval).Should(Succeed(), "Failed to list Machines for Cluster %s", klog.KObj(input.Cluster))
 
 		for _, machine := range machines.Items {
-			machineFD := pointer.StringDeref(machine.Spec.FailureDomain, "<None>")
+			machineFD := ptr.Deref(machine.Spec.FailureDomain, "<None>")
 			Expect(machineFD).To(Equal(machineDeploymentFD), "Machine %s is in the %q failure domain, expecting %q", machine.Name, machineFD, machineDeploymentFD)
 		}
 	}
@@ -325,7 +326,7 @@ func UpgradeMachineDeploymentInfrastructureRefAndWait(ctx context.Context, input
 			g.Expect(*newMachineSet.Spec.Replicas).To(Equal(newMachineSet.Status.AvailableReplicas))
 
 			// MachineSet should have the same infrastructureRef as the MachineDeployment.
-			g.Expect(newMachineSet.Spec.Template.Spec.InfrastructureRef).To(Equal(deployment.Spec.Template.Spec.InfrastructureRef))
+			g.Expect(newMachineSet.Spec.Template.Spec.InfrastructureRef).To(BeComparableTo(deployment.Spec.Template.Spec.InfrastructureRef))
 		}, input.WaitForMachinesToBeUpgraded...).Should(Succeed())
 	}
 }
@@ -465,7 +466,7 @@ func ScaleAndWaitMachineDeployment(ctx context.Context, input ScaleAndWaitMachin
 	log.Logf("Scaling machine deployment %s from %d to %d replicas", klog.KObj(input.MachineDeployment), *input.MachineDeployment.Spec.Replicas, input.Replicas)
 	patchHelper, err := patch.NewHelper(input.MachineDeployment, input.ClusterProxy.GetClient())
 	Expect(err).ToNot(HaveOccurred())
-	input.MachineDeployment.Spec.Replicas = pointer.Int32(input.Replicas)
+	input.MachineDeployment.Spec.Replicas = ptr.To[int32](input.Replicas)
 	Eventually(func() error {
 		return patchHelper.Patch(ctx, input.MachineDeployment)
 	}, retryableOperationTimeout, retryableOperationInterval).Should(Succeed(), "Failed to scale machine deployment %s", klog.KObj(input.MachineDeployment))
@@ -522,10 +523,14 @@ func ScaleAndWaitMachineDeploymentTopology(ctx context.Context, input ScaleAndWa
 	Expect(input.Cluster.Spec.Topology.Workers.MachineDeployments).NotTo(BeEmpty(), "Invalid argument. input.Cluster must have at least one MachineDeployment topology")
 
 	mdTopology := input.Cluster.Spec.Topology.Workers.MachineDeployments[0]
-	log.Logf("Scaling machine deployment topology %s from %d to %d replicas", mdTopology.Name, *mdTopology.Replicas, input.Replicas)
+	if mdTopology.Replicas != nil {
+		log.Logf("Scaling machine deployment topology %s from %d to %d replicas", mdTopology.Name, *mdTopology.Replicas, input.Replicas)
+	} else {
+		log.Logf("Scaling machine deployment topology %s to %d replicas", mdTopology.Name, input.Replicas)
+	}
 	patchHelper, err := patch.NewHelper(input.Cluster, input.ClusterProxy.GetClient())
 	Expect(err).ToNot(HaveOccurred())
-	mdTopology.Replicas = pointer.Int32(input.Replicas)
+	mdTopology.Replicas = ptr.To[int32](input.Replicas)
 	input.Cluster.Spec.Topology.Workers.MachineDeployments[0] = mdTopology
 	Eventually(func() error {
 		return patchHelper.Patch(ctx, input.Cluster)
@@ -577,5 +582,30 @@ func ScaleAndWaitMachineDeploymentTopology(ctx context.Context, input ScaleAndWa
 			return -1, errors.New("Machine count does not match existing nodes count")
 		}
 		return nodeRefCount, nil
-	}, input.WaitForMachineDeployments...).Should(Equal(int(*md.Spec.Replicas)), "Timed out waiting for Machine Deployment %s to have %d replicas", klog.KObj(&md), *md.Spec.Replicas)
+	}, input.WaitForMachineDeployments...).Should(Equal(int(input.Replicas)), "Timed out waiting for Machine Deployment %s to have %d replicas", klog.KObj(&md), input.Replicas)
+}
+
+type AssertMachineDeploymentReplicasInput struct {
+	Getter                   Getter
+	MachineDeployment        *clusterv1.MachineDeployment
+	Replicas                 int32
+	WaitForMachineDeployment []interface{}
+}
+
+func AssertMachineDeploymentReplicas(ctx context.Context, input AssertMachineDeploymentReplicasInput) {
+	Expect(ctx).NotTo(BeNil(), "ctx is required for AssertMachineDeploymentReplicas")
+	Expect(input.Getter).ToNot(BeNil(), "Invalid argument. input.Getter can't be nil when calling AssertMachineDeploymentReplicas")
+	Expect(input.MachineDeployment).ToNot(BeNil(), "Invalid argument. input.MachineDeployment can't be nil when calling AssertMachineDeploymentReplicas")
+
+	Eventually(func(g Gomega) {
+		// Get the MachineDeployment
+		md := &clusterv1.MachineDeployment{}
+		key := client.ObjectKey{
+			Namespace: input.MachineDeployment.Namespace,
+			Name:      input.MachineDeployment.Name,
+		}
+		g.Expect(input.Getter.Get(ctx, key, md)).To(Succeed(), fmt.Sprintf("failed to get MachineDeployment %s", klog.KObj(input.MachineDeployment)))
+		g.Expect(md.Spec.Replicas).Should(Not(BeNil()), fmt.Sprintf("MachineDeployment %s replicas should not be nil", klog.KObj(md)))
+		g.Expect(*md.Spec.Replicas).Should(Equal(input.Replicas), fmt.Sprintf("MachineDeployment %s replicas should match expected replicas", klog.KObj(md)))
+	}, input.WaitForMachineDeployment...).Should(Succeed())
 }

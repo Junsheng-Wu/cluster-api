@@ -9,13 +9,20 @@ updated info about which API version they are supporting.
 - [Amazon Elastic Kubernetes Service (EKS)](https://github.com/kubernetes-sigs/cluster-api-provider-aws/tree/main/bootstrap/eks)
 - [Kubeadm](https://github.com/kubernetes-sigs/cluster-api/tree/main/bootstrap/kubeadm)
 - [MicroK8s](https://github.com/canonical/cluster-api-bootstrap-provider-microk8s)
+- [Oracle Cloud Native Environment (OCNE)](https://github.com/verrazzano/cluster-api-provider-ocne)
 - [Talos](https://github.com/siderolabs/cluster-api-bootstrap-provider-talos)
+- [K3s](https://github.com/cluster-api-provider-k3s/cluster-api-k3s)
+- [k0smotron/k0s](https://github.com/k0sproject/k0smotron)
 
 ## Control Plane
 - [Kubeadm](https://github.com/kubernetes-sigs/cluster-api/tree/main/controlplane/kubeadm)
 - [MicroK8s](https://github.com/canonical/cluster-api-control-plane-provider-microk8s)
 - [Nested](https://github.com/kubernetes-sigs/cluster-api-provider-nested)
+- [Oracle Cloud Native Environment (OCNE)](https://github.com/verrazzano/cluster-api-provider-ocne)
 - [Talos](https://github.com/siderolabs/cluster-api-control-plane-provider-talos)
+- [Kamaji](https://github.com/clastix/cluster-api-control-plane-provider-kamaji)
+- [K3s](https://github.com/cluster-api-provider-k3s/cluster-api-k3s)
+- [k0smotron/k0s](https://github.com/k0sproject/k0smotron)
 
 ## Infrastructure
 - [AWS](https://cluster-api-aws.sigs.k8s.io/)
@@ -39,12 +46,20 @@ updated info about which API version they are supporting.
 - [Oracle Cloud Infrastructure (OCI)](https://github.com/oracle/cluster-api-provider-oci)
 - [OpenStack](https://github.com/kubernetes-sigs/cluster-api-provider-openstack)
 - [Outscale](https://github.com/outscale/cluster-api-provider-outscale)
+- [Proxmox](https://github.com/ionos-cloud/cluster-api-provider-proxmox)
 - [Sidero](https://github.com/siderolabs/sidero)
 - [Tinkerbell](https://github.com/tinkerbell/cluster-api-provider-tinkerbell)
 - [vcluster](https://github.com/loft-sh/cluster-api-provider-vcluster)
 - [Virtink](https://github.com/smartxworks/cluster-api-provider-virtink)
 - [VMware Cloud Director](https://github.com/vmware/cluster-api-provider-cloud-director)  
 - [vSphere](https://github.com/kubernetes-sigs/cluster-api-provider-vsphere)
+- [k0smotron RemoteMachine (SSH)](https://github.com/k0sproject/k0smotron)
+
+## IP Address Management (IPAM)
+- [In Cluster](https://github.com/kubernetes-sigs/cluster-api-ipam-provider-in-cluster)
+
+## Addon
+- [Helm](https://github.com/kubernetes-sigs/cluster-api-addon-provider-helm/)
 
 ## API Adopters
 

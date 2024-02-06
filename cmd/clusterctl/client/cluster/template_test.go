@@ -17,6 +17,7 @@ limitations under the License.
 package cluster
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"net/http"
@@ -26,7 +27,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/google/go-github/v48/github"
+	"github.com/google/go-github/v53/github"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -46,8 +47,8 @@ kind: Machine`
 func Test_templateClient_GetFromConfigMap(t *testing.T) {
 	g := NewWithT(t)
 
-	configClient, err := config.New("", config.InjectReader(test.NewFakeReader()))
-	g.Expect(err).NotTo(HaveOccurred())
+	configClient, err := config.New(context.Background(), "", config.InjectReader(test.NewFakeReader()))
+	g.Expect(err).ToNot(HaveOccurred())
 
 	configMap := &corev1.ConfigMap{
 		TypeMeta: metav1.TypeMeta{
@@ -134,14 +135,16 @@ func Test_templateClient_GetFromConfigMap(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			g := NewWithT(t)
 
+			ctx := context.Background()
+
 			processor := yaml.NewSimpleProcessor()
 			tc := newTemplateClient(TemplateClientInput{tt.fields.proxy, tt.fields.configClient, processor})
-			got, err := tc.GetFromConfigMap(tt.args.configMapNamespace, tt.args.configMapName, tt.args.configMapDataKey, tt.args.targetNamespace, tt.args.skipTemplateProcess)
+			got, err := tc.GetFromConfigMap(ctx, tt.args.configMapNamespace, tt.args.configMapName, tt.args.configMapDataKey, tt.args.targetNamespace, tt.args.skipTemplateProcess)
 			if tt.wantErr {
 				g.Expect(err).To(HaveOccurred())
 				return
 			}
-			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(err).ToNot(HaveOccurred())
 
 			wantTemplate, err := repository.NewTemplate(repository.TemplateInput{
 				RawArtifact:           []byte(tt.want),
@@ -150,7 +153,7 @@ func Test_templateClient_GetFromConfigMap(t *testing.T) {
 				TargetNamespace:       tt.args.targetNamespace,
 				SkipTemplateProcess:   tt.args.skipTemplateProcess,
 			})
-			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(err).ToNot(HaveOccurred())
 			g.Expect(got).To(Equal(wantTemplate))
 		})
 	}
@@ -162,8 +165,8 @@ func Test_templateClient_getGitHubFileContent(t *testing.T) {
 	client, mux, teardown := test.NewFakeGitHub()
 	defer teardown()
 
-	configClient, err := config.New("", config.InjectReader(test.NewFakeReader()))
-	g.Expect(err).NotTo(HaveOccurred())
+	configClient, err := config.New(context.Background(), "", config.InjectReader(test.NewFakeReader()))
+	g.Expect(err).ToNot(HaveOccurred())
 
 	mux.HandleFunc("/repos/kubernetes-sigs/cluster-api/contents/config/default/cluster-template.yaml", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{
@@ -207,19 +210,21 @@ func Test_templateClient_getGitHubFileContent(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			g := NewWithT(t)
 
+			ctx := context.Background()
+
 			c := &templateClient{
 				configClient: configClient,
-				gitHubClientFactory: func(configVariablesClient config.VariablesClient) (*github.Client, error) {
+				gitHubClientFactory: func(ctx context.Context, configVariablesClient config.VariablesClient) (*github.Client, error) {
 					return client, nil
 				},
 			}
-			got, err := c.getGitHubFileContent(tt.args.rURL)
+			got, err := c.getGitHubFileContent(ctx, tt.args.rURL)
 			if tt.wantErr {
 				g.Expect(err).To(HaveOccurred())
 				return
 			}
 
-			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(err).ToNot(HaveOccurred())
 
 			g.Expect(got).To(Equal(tt.want))
 		})
@@ -255,14 +260,16 @@ func Test_templateClient_getRawUrlFileContent(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			g := NewWithT(t)
 
+			ctx := context.Background()
+
 			c := newTemplateClient(TemplateClientInput{})
-			got, err := c.getRawURLFileContent(tt.args.rURL)
+			got, err := c.getRawURLFileContent(ctx, tt.args.rURL)
 			if tt.wantErr {
 				g.Expect(err).To(HaveOccurred())
 				return
 			}
 
-			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(err).ToNot(HaveOccurred())
 
 			g.Expect(got).To(Equal(tt.want))
 		})
@@ -273,7 +280,7 @@ func Test_templateClient_getLocalFileContent(t *testing.T) {
 	g := NewWithT(t)
 
 	tmpDir, err := os.MkdirTemp("", "cc")
-	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(err).ToNot(HaveOccurred())
 	defer os.RemoveAll(tmpDir)
 
 	path := filepath.Join(tmpDir, "cluster-template.yaml")
@@ -316,7 +323,7 @@ func Test_templateClient_getLocalFileContent(t *testing.T) {
 				return
 			}
 
-			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(err).ToNot(HaveOccurred())
 
 			g.Expect(got).To(Equal(tt.want))
 		})
@@ -327,11 +334,11 @@ func Test_templateClient_GetFromURL(t *testing.T) {
 	g := NewWithT(t)
 
 	tmpDir, err := os.MkdirTemp("", "cc")
-	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(err).ToNot(HaveOccurred())
 	defer os.RemoveAll(tmpDir)
 
-	configClient, err := config.New("", config.InjectReader(test.NewFakeReader()))
-	g.Expect(err).NotTo(HaveOccurred())
+	configClient, err := config.New(context.Background(), "", config.InjectReader(test.NewFakeReader()))
+	g.Expect(err).ToNot(HaveOccurred())
 
 	fakeGithubClient, mux, teardown := test.NewFakeGitHub()
 	defer teardown()
@@ -401,7 +408,7 @@ func Test_templateClient_GetFromURL(t *testing.T) {
 	saveStdin := os.Stdin
 	defer func() { os.Stdin = saveStdin }()
 	os.Stdin, err = os.Open(path) //nolint:gosec
-	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(err).ToNot(HaveOccurred())
 
 	type args struct {
 		templateURL         string
@@ -479,7 +486,9 @@ func Test_templateClient_GetFromURL(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			g := NewWithT(t)
 
-			gitHubClientFactory := func(configVariablesClient config.VariablesClient) (*github.Client, error) {
+			ctx := context.Background()
+
+			gitHubClientFactory := func(ctx context.Context, configVariablesClient config.VariablesClient) (*github.Client, error) {
 				return fakeGithubClient, nil
 			}
 			processor := yaml.NewSimpleProcessor()
@@ -487,13 +496,13 @@ func Test_templateClient_GetFromURL(t *testing.T) {
 			// override the github client factory
 			c.gitHubClientFactory = gitHubClientFactory
 
-			got, err := c.GetFromURL(tt.args.templateURL, tt.args.targetNamespace, tt.args.skipTemplateProcess)
+			got, err := c.GetFromURL(ctx, tt.args.templateURL, tt.args.targetNamespace, tt.args.skipTemplateProcess)
 			if tt.wantErr {
 				g.Expect(err).To(HaveOccurred())
 				return
 			}
 
-			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(err).ToNot(HaveOccurred())
 
 			wantTemplate, err := repository.NewTemplate(repository.TemplateInput{
 				RawArtifact:           []byte(tt.want),
@@ -502,7 +511,7 @@ func Test_templateClient_GetFromURL(t *testing.T) {
 				TargetNamespace:       tt.args.targetNamespace,
 				SkipTemplateProcess:   tt.args.skipTemplateProcess,
 			})
-			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(err).ToNot(HaveOccurred())
 			g.Expect(got).To(Equal(wantTemplate))
 		})
 	}

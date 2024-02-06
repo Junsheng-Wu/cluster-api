@@ -77,7 +77,7 @@ func TestNodeRegistrationOptionsMarshalJSON(t *testing.T) {
 			g := NewWithT(t)
 
 			b, err := tt.opts.MarshalJSON()
-			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(err).ToNot(HaveOccurred())
 			g.Expect(string(b)).To(Equal(tt.expected))
 		})
 	}
@@ -97,7 +97,7 @@ func TestBootstrapTokenStringMarshalJSON(t *testing.T) {
 			g := NewWithT(t)
 
 			b, err := json.Marshal(rt.bts)
-			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(err).ToNot(HaveOccurred())
 			g.Expect(string(b)).To(Equal(rt.expected))
 		})
 	}
@@ -127,9 +127,9 @@ func TestBootstrapTokenStringUnmarshalJSON(t *testing.T) {
 			if rt.expectedError {
 				g.Expect(err).To(HaveOccurred())
 			} else {
-				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(err).ToNot(HaveOccurred())
 			}
-			g.Expect(newbts).To(Equal(rt.bts))
+			g.Expect(newbts).To(BeComparableTo(rt.bts))
 		})
 	}
 }
@@ -238,9 +238,9 @@ func TestNewBootstrapTokenString(t *testing.T) {
 			if rt.expectedError {
 				g.Expect(err).To(HaveOccurred())
 			} else {
-				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(err).ToNot(HaveOccurred())
 			}
-			g.Expect(actual).To(Equal(rt.bts))
+			g.Expect(actual).To(BeComparableTo(rt.bts))
 		})
 	}
 }

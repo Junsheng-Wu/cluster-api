@@ -19,7 +19,7 @@ package collections
 import (
 	"time"
 
-	"github.com/blang/semver"
+	"github.com/blang/semver/v4"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
@@ -262,5 +262,15 @@ func HealthyAPIServer() Func {
 			return false
 		}
 		return conditions.IsTrue(machine, controlplanev1.MachineAPIServerPodHealthyCondition)
+	}
+}
+
+// HasNode returns a filter to find all machines that have a corresponding Kubernetes node.
+func HasNode() Func {
+	return func(machine *clusterv1.Machine) bool {
+		if machine == nil {
+			return false
+		}
+		return machine.Status.NodeRef != nil
 	}
 }

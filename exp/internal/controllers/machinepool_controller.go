@@ -19,7 +19,7 @@ package controllers
 import (
 	"context"
 	"fmt"
-	"sync"
+	"time"
 
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
@@ -36,14 +36,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/cluster-api/api/v1beta1/index"
 	"sigs.k8s.io/cluster-api/controllers/external"
-	"sigs.k8s.io/cluster-api/controllers/noderefutil"
 	"sigs.k8s.io/cluster-api/controllers/remote"
 	expv1 "sigs.k8s.io/cluster-api/exp/api/v1beta1"
+	"sigs.k8s.io/cluster-api/internal/util/ssa"
 	"sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/annotations"
 	"sigs.k8s.io/cluster-api/util/conditions"
@@ -56,6 +55,11 @@ import (
 // +kubebuilder:rbac:groups=core,resources=nodes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io;bootstrap.cluster.x-k8s.io,resources=*,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machinepools;machinepools/status;machinepools/finalizers,verbs=get;list;watch;create;update;patch;delete
+
+var (
+	// machinePoolKind contains the schema.GroupVersionKind for the MachinePool type.
+	machinePoolKind = clusterv1.GroupVersion.WithKind("MachinePool")
+)
 
 const (
 	// MachinePoolControllerName defines the controller used when creating clients.
@@ -71,13 +75,14 @@ type MachinePoolReconciler struct {
 	// WatchFilterValue is the label value used to filter events prior to reconciliation.
 	WatchFilterValue string
 
-	controller       controller.Controller
-	recorder         record.EventRecorder
-	externalWatchers sync.Map
+	controller      controller.Controller
+	ssaCache        ssa.Cache
+	recorder        record.EventRecorder
+	externalTracker external.ObjectTracker
 }
 
 func (r *MachinePoolReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager, options controller.Options) error {
-	clusterToMachinePools, err := util.ClusterToObjectsMapper(mgr.GetClient(), &expv1.MachinePoolList{}, mgr.GetScheme())
+	clusterToMachinePools, err := util.ClusterToTypedObjectsMapper(mgr.GetClient(), &expv1.MachinePoolList{}, mgr.GetScheme())
 	if err != nil {
 		return err
 	}
@@ -87,7 +92,7 @@ func (r *MachinePoolReconciler) SetupWithManager(ctx context.Context, mgr ctrl.M
 		WithOptions(options).
 		WithEventFilter(predicates.ResourceNotPausedAndHasFilterLabel(ctrl.LoggerFrom(ctx), r.WatchFilterValue)).
 		Watches(
-			&source.Kind{Type: &clusterv1.Cluster{}},
+			&clusterv1.Cluster{},
 			handler.EnqueueRequestsFromMapFunc(clusterToMachinePools),
 			// TODO: should this wait for Cluster.Status.InfrastructureReady similar to Infra Machine resources?
 			builder.WithPredicates(
@@ -104,6 +109,12 @@ func (r *MachinePoolReconciler) SetupWithManager(ctx context.Context, mgr ctrl.M
 
 	r.controller = c
 	r.recorder = mgr.GetEventRecorderFor("machinepool-controller")
+	r.externalTracker = external.ObjectTracker{
+		Controller: c,
+		Cache:      mgr.GetCache(),
+	}
+	r.ssaCache = ssa.NewCache()
+
 	return nil
 }
 
@@ -158,18 +169,16 @@ func (r *MachinePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 		// Always attempt to patch the object and status after each reconciliation.
 		// Patch ObservedGeneration only if the reconciliation completed successfully
-		patchOpts := []patch.Option{}
+		patchOpts := []patch.Option{
+			patch.WithOwnedConditions{Conditions: []clusterv1.ConditionType{
+				clusterv1.ReadyCondition,
+				clusterv1.BootstrapReadyCondition,
+				clusterv1.InfrastructureReadyCondition,
+				expv1.ReplicasReadyCondition,
+			}},
+		}
 		if reterr == nil {
-			patchOpts = append(
-				patchOpts,
-				patch.WithStatusObservedGeneration{},
-				patch.WithOwnedConditions{Conditions: []clusterv1.ConditionType{
-					clusterv1.ReadyCondition,
-					clusterv1.BootstrapReadyCondition,
-					clusterv1.InfrastructureReadyCondition,
-					expv1.ReplicasReadyCondition,
-				}},
-			)
+			patchOpts = append(patchOpts, patch.WithStatusObservedGeneration{})
 		}
 		if err := patchHelper.Patch(ctx, mp, patchOpts...); err != nil {
 			reterr = kerrors.NewAggregate([]error{reterr, err})
@@ -182,26 +191,41 @@ func (r *MachinePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 	mp.Labels[clusterv1.ClusterNameLabel] = mp.Spec.ClusterName
 
-	// Add finalizer first if not exist to avoid the race condition between init and delete
+	// Handle deletion reconciliation loop.
+	if !mp.ObjectMeta.DeletionTimestamp.IsZero() {
+		err := r.reconcileDelete(ctx, cluster, mp)
+		// Requeue if the reconcile failed because the ClusterCacheTracker was locked for
+		// the current cluster because of concurrent access.
+		if errors.Is(err, remote.ErrClusterLocked) {
+			log.V(5).Info("Requeuing because another worker has the lock on the ClusterCacheTracker")
+			return ctrl.Result{RequeueAfter: time.Minute}, nil
+		}
+		return ctrl.Result{}, err
+	}
+
+	// Add finalizer first if not set to avoid the race condition between init and delete.
+	// Note: Finalizers in general can only be added when the deletionTimestamp is not set.
 	if !controllerutil.ContainsFinalizer(mp, expv1.MachinePoolFinalizer) {
 		controllerutil.AddFinalizer(mp, expv1.MachinePoolFinalizer)
 		return ctrl.Result{}, nil
 	}
 
-	// Handle deletion reconciliation loop.
-	if !mp.ObjectMeta.DeletionTimestamp.IsZero() {
-		return r.reconcileDelete(ctx, cluster, mp)
-	}
-
 	// Handle normal reconciliation loop.
-	return r.reconcile(ctx, cluster, mp)
+	res, err := r.reconcile(ctx, cluster, mp)
+	// Requeue if the reconcile failed because the ClusterCacheTracker was locked for
+	// the current cluster because of concurrent access.
+	if errors.Is(err, remote.ErrClusterLocked) {
+		log.V(5).Info("Requeuing because another worker has the lock on the ClusterCacheTracker")
+		return ctrl.Result{RequeueAfter: time.Minute}, nil
+	}
+	return res, err
 }
 
 func (r *MachinePoolReconciler) reconcile(ctx context.Context, cluster *clusterv1.Cluster, mp *expv1.MachinePool) (ctrl.Result, error) {
 	// Ensure the MachinePool is owned by the Cluster it belongs to.
 	mp.SetOwnerReferences(util.EnsureOwnerRef(mp.GetOwnerReferences(), metav1.OwnerReference{
 		APIVersion: clusterv1.GroupVersion.String(),
-		Kind:       cluster.Kind,
+		Kind:       "Cluster",
 		Name:       cluster.Name,
 		UID:        cluster.UID,
 	}))
@@ -229,20 +253,20 @@ func (r *MachinePoolReconciler) reconcile(ctx context.Context, cluster *clusterv
 	return res, kerrors.NewAggregate(errs)
 }
 
-func (r *MachinePoolReconciler) reconcileDelete(ctx context.Context, cluster *clusterv1.Cluster, mp *expv1.MachinePool) (ctrl.Result, error) {
+func (r *MachinePoolReconciler) reconcileDelete(ctx context.Context, cluster *clusterv1.Cluster, mp *expv1.MachinePool) error {
 	if ok, err := r.reconcileDeleteExternal(ctx, mp); !ok || err != nil {
 		// Return early and don't remove the finalizer if we got an error or
 		// the external reconciliation deletion isn't ready.
-		return ctrl.Result{}, err
+		return err
 	}
 
 	if err := r.reconcileDeleteNodes(ctx, cluster, mp); err != nil {
 		// Return early and don't remove the finalizer if we got an error.
-		return ctrl.Result{}, err
+		return err
 	}
 
 	controllerutil.RemoveFinalizer(mp, expv1.MachinePoolFinalizer)
-	return ctrl.Result{}, nil
+	return nil
 }
 
 func (r *MachinePoolReconciler) reconcileDeleteNodes(ctx context.Context, cluster *clusterv1.Cluster, machinepool *expv1.MachinePool) error {
@@ -250,7 +274,7 @@ func (r *MachinePoolReconciler) reconcileDeleteNodes(ctx context.Context, cluste
 		return nil
 	}
 
-	clusterClient, err := remote.NewClusterClient(ctx, MachinePoolControllerName, r.Client, util.ObjectKey(cluster))
+	clusterClient, err := r.Tracker.GetClient(ctx, util.ObjectKey(cluster))
 	if err != nil {
 		return err
 	}
@@ -317,7 +341,7 @@ func (r *MachinePoolReconciler) watchClusterNodes(ctx context.Context, cluster *
 	})
 }
 
-func (r *MachinePoolReconciler) nodeToMachinePool(o client.Object) []reconcile.Request {
+func (r *MachinePoolReconciler) nodeToMachinePool(ctx context.Context, o client.Object) []reconcile.Request {
 	node, ok := o.(*corev1.Node)
 	if !ok {
 		panic(fmt.Sprintf("Expected a Node but got a %T", o))
@@ -339,7 +363,7 @@ func (r *MachinePoolReconciler) nodeToMachinePool(o client.Object) []reconcile.R
 	// Match by nodeName and status.nodeRef.name.
 	machinePoolList := &expv1.MachinePoolList{}
 	if err := r.Client.List(
-		context.TODO(),
+		ctx,
 		machinePoolList,
 		append(filters, client.MatchingFields{index.MachinePoolNodeNameField: node.Name})...); err != nil {
 		return nil
@@ -352,15 +376,14 @@ func (r *MachinePoolReconciler) nodeToMachinePool(o client.Object) []reconcile.R
 
 	// Otherwise let's match by providerID. This is useful when e.g the NodeRef has not been set yet.
 	// Match by providerID
-	nodeProviderID, err := noderefutil.NewProviderID(node.Spec.ProviderID)
-	if err != nil {
+	if node.Spec.ProviderID == "" {
 		return nil
 	}
 	machinePoolList = &expv1.MachinePoolList{}
 	if err := r.Client.List(
-		context.TODO(),
+		ctx,
 		machinePoolList,
-		append(filters, client.MatchingFields{index.MachinePoolProviderIDField: nodeProviderID.IndexKey()})...); err != nil {
+		append(filters, client.MatchingFields{index.MachinePoolProviderIDField: node.Spec.ProviderID})...); err != nil {
 		return nil
 	}
 

@@ -22,7 +22,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -34,7 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -150,7 +149,7 @@ func (r *Reconciler) updateMachineSet(ctx context.Context, deployment *clusterv1
 	log := ctrl.LoggerFrom(ctx)
 
 	// Compute the desired MachineSet.
-	updatedMS, err := r.computeDesiredMachineSet(deployment, ms, oldMSs, log)
+	updatedMS, err := r.computeDesiredMachineSet(ctx, deployment, ms, oldMSs)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to update MachineSet %q", klog.KObj(ms))
 	}
@@ -172,7 +171,7 @@ func (r *Reconciler) createMachineSetAndWait(ctx context.Context, deployment *cl
 	log := ctrl.LoggerFrom(ctx)
 
 	// Compute the desired MachineSet.
-	newMS, err := r.computeDesiredMachineSet(deployment, nil, oldMSs, log)
+	newMS, err := r.computeDesiredMachineSet(ctx, deployment, nil, oldMSs)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create new MachineSet")
 	}
@@ -189,7 +188,7 @@ func (r *Reconciler) createMachineSetAndWait(ctx context.Context, deployment *cl
 	// the MachineDeployment to reconcile with an outdated list of MachineSets which could lead to unwanted creation of
 	// a duplicate MachineSet.
 	var pollErrors []error
-	if err := wait.PollImmediate(100*time.Millisecond, 10*time.Second, func() (bool, error) {
+	if err := wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 10*time.Second, true, func(ctx context.Context) (bool, error) {
 		ms := &clusterv1.MachineSet{}
 		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(newMS), ms); err != nil {
 			// Do not return error here. Continue to poll even if we hit an error
@@ -213,7 +212,7 @@ func (r *Reconciler) createMachineSetAndWait(ctx context.Context, deployment *cl
 // There are small differences in how we calculate the MachineSet depending on if it
 // is a create or update. Example: for a new MachineSet we have to calculate a new name,
 // while for an existing MachineSet we have to use the name of the existing MachineSet.
-func (r *Reconciler) computeDesiredMachineSet(deployment *clusterv1.MachineDeployment, existingMS *clusterv1.MachineSet, oldMSs []*clusterv1.MachineSet, log logr.Logger) (*clusterv1.MachineSet, error) {
+func (r *Reconciler) computeDesiredMachineSet(ctx context.Context, deployment *clusterv1.MachineDeployment, existingMS *clusterv1.MachineSet, oldMSs []*clusterv1.MachineSet) (*clusterv1.MachineSet, error) {
 	var name string
 	var uid types.UID
 	var finalizers []string
@@ -240,9 +239,9 @@ func (r *Reconciler) computeDesiredMachineSet(deployment *clusterv1.MachineDeplo
 		// Append a random string at the end of template hash. This is required to distinguish MachineSets that
 		// could be created with the same spec as a result of rolloutAfter. If not, computeDesiredMachineSet
 		// will end up updating the existing MachineSet instead of creating a new one.
-		uniqueIdentifierLabelValue = fmt.Sprintf("%d-%s", templateHash, apirand.String(5))
-
-		name = computeNewMachineSetName(deployment.Name+"-", apirand.SafeEncodeString(uniqueIdentifierLabelValue))
+		var randomSuffix string
+		name, randomSuffix = computeNewMachineSetName(deployment.Name + "-")
+		uniqueIdentifierLabelValue = fmt.Sprintf("%d-%s", templateHash, randomSuffix)
 
 		// Add foregroundDeletion finalizer to MachineSet if the MachineDeployment has it.
 		if sets.New[string](deployment.Finalizers...).Has(metav1.FinalizerDeleteDependents) {
@@ -276,7 +275,7 @@ func (r *Reconciler) computeDesiredMachineSet(deployment *clusterv1.MachineDeplo
 		// the finalizer on the MachineSet if it already exists. Because of SSA we should not build
 		// the finalizer information from the MachineDeployment when updating a MachineSet because that could lead
 		// to dropping the finalizer from the MachineSet if it is dropped from the MachineDeployment.
-		// We should not drop the finalizer on the MachineSet if the finalizer is dropped form the MachineDeployment.
+		// We should not drop the finalizer on the MachineSet if the finalizer is dropped from the MachineDeployment.
 		if sets.New[string](existingMS.Finalizers...).Has(metav1.FinalizerDeleteDependents) {
 			finalizers = []string{metav1.FinalizerDeleteDependents}
 		}
@@ -328,15 +327,15 @@ func (r *Reconciler) computeDesiredMachineSet(deployment *clusterv1.MachineDeplo
 	desiredMS.Spec.Selector = *mdutil.CloneSelectorAndAddLabel(&deployment.Spec.Selector, clusterv1.MachineDeploymentUniqueLabel, uniqueIdentifierLabelValue)
 
 	// Set annotations and .spec.template.annotations.
-	if desiredMS.Annotations, err = mdutil.ComputeMachineSetAnnotations(log, deployment, oldMSs, existingMS); err != nil {
+	if desiredMS.Annotations, err = mdutil.ComputeMachineSetAnnotations(ctx, deployment, oldMSs, existingMS); err != nil {
 		return nil, errors.Wrap(err, "failed to compute desired MachineSet: failed to compute annotations")
 	}
 	desiredMS.Spec.Template.Annotations = cloneStringMap(deployment.Spec.Template.Annotations)
 
 	// Set all other in-place mutable fields.
-	desiredMS.Spec.MinReadySeconds = pointer.Int32Deref(deployment.Spec.MinReadySeconds, 0)
+	desiredMS.Spec.MinReadySeconds = ptr.Deref(deployment.Spec.MinReadySeconds, 0)
 	if deployment.Spec.Strategy != nil && deployment.Spec.Strategy.RollingUpdate != nil {
-		desiredMS.Spec.DeletePolicy = pointer.StringDeref(deployment.Spec.Strategy.RollingUpdate.DeletePolicy, "")
+		desiredMS.Spec.DeletePolicy = ptr.Deref(deployment.Spec.Strategy.RollingUpdate.DeletePolicy, "")
 	} else {
 		desiredMS.Spec.DeletePolicy = ""
 	}
@@ -366,11 +365,12 @@ const (
 // the upstream SimpleNameGenerator.
 // Note: We had to extract the logic as we want to use the MachineSet name suffix as
 // unique identifier for the MachineSet.
-func computeNewMachineSetName(base, suffix string) string {
+func computeNewMachineSetName(base string) (string, string) {
 	if len(base) > maxGeneratedNameLength {
 		base = base[:maxGeneratedNameLength]
 	}
-	return fmt.Sprintf("%s%s", base, suffix)
+	r := apirand.String(randomLength)
+	return fmt.Sprintf("%s%s", base, r), r
 }
 
 // scale scales proportionally in order to mitigate risk. Otherwise, scaling up can increase the size

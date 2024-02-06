@@ -15,19 +15,6 @@ Please read the [announcement](https://kubernetes.io/blog/2023/03/10/image-regis
 
 Also, this [guide](https://github.com/kubernetes/registry.k8s.io/tree/main/docs/mirroring) provide instructions about how to identify images to mirror and how to use mirrored images.
 
-</aside>
-
-<aside class="note">
-<h1>Deprecated API removal</h1>
-
-- API version v1alpha3 support will be removed in the upcoming release of v1.5
-- API version v1alpha4 support will be removed in the upcoming release of v1.6
-
-Review the [support-and-guarantees](./CONTRIBUTING.md#support-and-guarantees) section of the
-contributing guide for more details.
-
-</aside>
-
 ## Getting started
 
 * [Quick Start](./user/quick-start.md)
@@ -40,8 +27,9 @@ contributing guide for more details.
 
 <h1>ClusterAPI documentation versions</h1>
 
-This book documents ClusterAPI v1.5. For other Cluster API versions please see the corresponding documentation:
+This book documents ClusterAPI v1.6. For other Cluster API versions please see the corresponding documentation:
 * [main.cluster-api.sigs.k8s.io](https://main.cluster-api.sigs.k8s.io)
+* [release-1-5.cluster-api.sigs.k8s.io](https://release-1-5.cluster-api.sigs.k8s.io)
 * [release-1-4.cluster-api.sigs.k8s.io](https://release-1-4.cluster-api.sigs.k8s.io)
 * [release-1-3.cluster-api.sigs.k8s.io](https://release-1-3.cluster-api.sigs.k8s.io)
 * [release-1-2.cluster-api.sigs.k8s.io](https://release-1-2.cluster-api.sigs.k8s.io)
